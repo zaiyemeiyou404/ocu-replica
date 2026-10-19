@@ -1,0 +1,64 @@
+name: Windows CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: clippy
+
+      - name: cargo build --release (MSVC)
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Upload ocu-replica.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocu-replica-${{ matrix.os }}
+          path: target/x86_64-pc-windows-msvc/release/ocu-replica.exe
+          if-no-files-found: error
+
+      - name: cargo test
+        run: cargo test --target x86_64-pc-windows-msvc -- --test-threads=8
+
+      - name: cargo clippy (non-blocking)
+        continue-on-error: true
+        run: cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -W clippy::all
+
+      - name: Live GUI integration
+        shell: pwsh
+        env:
+          OCU_PREAPPROVE: notepad.exe,mspaint.exe
+          OCU_INPUT_MODE: foreground
+          OCU_IDLE_MS: "0"
+        run: pwsh -NoProfile -File ./scripts/live-gui-test.ps1 -Exe ./target/x86_64-pc-windows-msvc/release/ocu-replica.exe -OutDir gui-artifacts
+
+      - name: Upload GUI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-evidence-${{ matrix.os }}
+          path: gui-artifacts/**
+          if-no-files-found: warn
