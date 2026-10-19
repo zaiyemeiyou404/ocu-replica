@@ -43,9 +43,10 @@ function New-OcuClient([string]$Label, [hashtable]$ExtraEnv) {
     $psi.CreateNoWindow = $true
     $psi.StandardOutputEncoding = New-Object System.Text.UTF8Encoding $false
     $psi.StandardErrorEncoding = New-Object System.Text.UTF8Encoding $false
-    $home = Join-Path $OutDir "home-$Label"
-    New-Item -ItemType Directory -Force -Path $home | Out-Null
-    $psi.Environment["OCU_REPLICA_HOME"] = $home
+    # $HOME is a read-only automatic variable in PowerShell.
+    $stateDir = Join-Path $OutDir "home-$Label"
+    New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+    $psi.Environment["OCU_REPLICA_HOME"] = $stateDir
     $psi.Environment["OCU_PREAPPROVE"] = "notepad.exe,mspaint.exe"
     $psi.Environment["OCU_INPUT_MODE"] = "foreground"
     $psi.Environment["OCU_IDLE_MS"] = "0"
