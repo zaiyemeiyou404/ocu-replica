@@ -21,7 +21,10 @@ use windows::Win32::UI::Accessibility::{
 use windows::Win32::Foundation::HWND;
 
 struct CachedElement {
-    // We re-resolve by RuntimeId / index within the same revision.
+    // Keep the actual element: live traversal indexes can change independently
+    // of our snapshot revision when the application inserts or removes controls.
+    element: IUIAutomationElement,
+    automation_id: String,
     name: String,
     control_type: String,
     bounds: Rect,
@@ -101,17 +104,55 @@ impl AxState {
     }
 
     pub fn element_bounds(&self, window_id: u64, element_index: u64, revision: u64) -> Result<Rect, String> {
-        Ok(self.lookup(window_id, element_index, revision)?.bounds)
+        unsafe { element_rect(&self.live_element(window_id, element_index, revision)?) }
+    }
+
+    fn live_element(&self, window_id: u64, element_index: u64, revision: u64) -> Result<IUIAutomationElement, String> {
+        let cached = self.lookup(window_id, element_index, revision)?;
+        unsafe {
+            let el = &cached.element;
+            let name = el.CurrentName().map_err(|e| format!("stale element: {e}"))?.to_string();
+            let aid = el.CurrentAutomationId().map_err(|e| format!("stale element: {e}"))?.to_string();
+            if name != cached.name || aid != cached.automation_id || control_type_name(el) != cached.control_type {
+                return Err("stale element identity; call get_window_state again".into());
+            }
+            if !el.CurrentIsEnabled().map_err(|e| e.to_string())?.as_bool() {
+                return Err("target element is disabled".into());
+            }
+            let root = self.automation.ElementFromHandle(HWND(window_id as usize as _)).map_err(|e| e.to_string())?;
+            let walker = self.automation.ControlViewWalker().map_err(|e| e.to_string())?;
+            let mut current = el.clone();
+            for _ in 0..64 {
+                if self.automation.CompareElements(&current, &root).map_err(|e| e.to_string())?.as_bool() {
+                    return Ok(el.clone());
+                }
+                current = walker.GetParentElement(&current).map_err(|_| "stale element no longer belongs to target window".to_string())?;
+            }
+            Err("element ancestry exceeds validation limit".into())
+        }
+    }
+
+    pub fn native_control(&self, window_id: u64, element_index: u64, revision: u64) -> Result<Option<HWND>, String> {
+        let el = self.live_element(window_id, element_index, revision)?;
+        unsafe {
+            let hwnd = el.CurrentNativeWindowHandle().map_err(|e| e.to_string())?;
+            if hwnd.0.is_null() { return Ok(None); }
+            let root = HWND(window_id as usize as _);
+            if hwnd != root && !windows::Win32::UI::WindowsAndMessaging::IsChild(root, hwnd).as_bool() {
+                return Err("native control is outside target window".into());
+            }
+            Ok(Some(hwnd))
+        }
     }
 
     pub fn set_value(&self, window_id: u64, element_index: u64, revision: u64, value: &str) -> Result<(), String> {
         let _ = self.lookup(window_id, element_index, revision)?;
-        // Re-resolve live element by walking to the same index (best-effort).
+        // Resolve the cached element itself, never a reused traversal index.
         let hwnd = HWND(window_id as usize as _);
         unsafe {
             let root = self.automation.ElementFromHandle(hwnd)
                 .map_err(|e| format!("ElementFromHandle: {e}"))?;
-            let el = nth_element(&self.automation, &root, element_index)?;
+            let el = self.live_element(window_id, element_index, revision)?;
             if let Ok(pat) = el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {
                 let bstr = BSTR::from(value);
                 pat.SetValue(&bstr).map_err(|e| format!("set UIA value: {e}"))?;
@@ -132,7 +173,7 @@ impl AxState {
         unsafe {
             let root = self.automation.ElementFromHandle(hwnd)
                 .map_err(|e| format!("ElementFromHandle: {e}"))?;
-            let el = nth_element(&self.automation, &root, element_index)?;
+            let el = self.live_element(window_id, element_index, revision)?;
             let pat = el.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
                 .map_err(|_| "element no longer exposes ScrollPattern".to_string())?;
             // ScrollPattern uses 0..100 percentages; approximate pages as 10% each.
@@ -165,7 +206,7 @@ impl AxState {
         unsafe {
             let root = self.automation.ElementFromHandle(hwnd)
                 .map_err(|e| format!("ElementFromHandle: {e}"))?;
-            let el = nth_element(&self.automation, &root, element_index)?;
+            let el = self.live_element(window_id, element_index, revision)?;
             match action {
                 SecondaryAction::Expand | SecondaryAction::Collapse => {
                     let pat = el.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(UIA_ExpandCollapsePatternId)
@@ -188,13 +229,13 @@ impl AxState {
         }
     }
 
-    /// Index + revision of the first edit/document element from the last snapshot.
-    /// Used so background `type_text` can target a ValuePattern without a cursor.
-    pub fn first_editable(&self, window_id: u64) -> Option<(u64, u64)> {
+    /// Return an implicit target only when exactly one edit/document exists.
+    /// Multi-field forms require an explicit element_index.
+    pub fn unique_editable(&self, window_id: u64) -> Option<(u64, u64)> {
         let (rev, elems) = self.cache.get(&window_id)?;
-        let idx = elems.iter().position(|e| {
-            matches!(e.control_type.as_str(), "edit" | "document")
-        })?;
+        let mut edits = elems.iter().enumerate().filter(|(_, e)| matches!(e.control_type.as_str(), "edit" | "document"));
+        let (idx, _) = edits.next()?;
+        if edits.next().is_some() { return None; }
         Some((idx as u64, *rev))
     }
 
@@ -265,7 +306,8 @@ unsafe fn walk(
             doc_values.push(v);
         }
     }
-    out.push(CachedElement { name, control_type: ctype, bounds, secondary });
+    let automation_id = el.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default();
+    out.push(CachedElement { element: el.clone(), automation_id, name, control_type: ctype, bounds, secondary });
 
     // Children.
     if let Ok(child) = walker.GetFirstChildElement(el) {
@@ -342,7 +384,8 @@ unsafe fn control_type_name(el: &IUIAutomationElement) -> String {
             50024 => "tab item",
             50025 => "thumb",
             50006 => "image",
-            50029 => "document",
+            50029 => "data item",
+            50030 => "document",
             other => return format!("ctrl:{other}"),
         }.into(),
         Err(_) => "unknown".into(),
@@ -366,7 +409,7 @@ impl AxState {
         let hwnd = HWND(window_id as usize as _);
         unsafe {
             let root = self.automation.ElementFromHandle(hwnd).map_err(|e| e.to_string())?;
-            let el = nth_element(&self.automation, &root, element_index)?;
+            let el = self.live_element(window_id, element_index, revision)?;
             if let Ok(pat) = el.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) {
                 pat.Invoke().map_err(|e| format!("InvokePattern: {e}"))?;
                 return Ok(());
@@ -403,7 +446,7 @@ impl AxState {
         let hwnd = HWND(window_id as usize as _);
         unsafe {
             let root = self.automation.ElementFromHandle(hwnd).map_err(|e| e.to_string())?;
-            let el = nth_element(&self.automation, &root, element_index)?;
+            let el = self.live_element(window_id, element_index, revision)?;
             if let Ok(pat) = el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {
                 let cur = pat.CurrentValue().ok().map(|b| b.to_string()).unwrap_or_default();
                 let bstr = BSTR::from(format!("{cur}{text}"));

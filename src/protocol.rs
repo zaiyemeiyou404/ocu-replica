@@ -264,7 +264,7 @@ pub enum Call {
     Drag { window: WindowRef, from: (f64, f64), to: (f64, f64), screenshot_id: Option<String> },
     Scroll { window: WindowRef, x: f64, y: f64, screenshot_id: Option<String>, scroll_x: f64, scroll_y: f64 },
     ScrollElement { window: WindowRef, element_index: u64, direction: Direction, pages: f64 },
-    TypeText { window: WindowRef, text: String },
+    TypeText { window: WindowRef, text: String, element_index: Option<u64> },
     PressKey { window: WindowRef, key: String },
     SetValue { window: WindowRef, element_index: u64, value: String },
     PerformSecondaryAction { window: WindowRef, element_index: u64, action: SecondaryAction },
@@ -431,6 +431,10 @@ pub fn parse_call(method: &str, params: &Value) -> Result<Call, String> {
         "type_text" => Call::TypeText {
             window: parse_window(params)?,
             text: m.get("text").and_then(Value::as_str).ok_or("text must be a string")?.to_string(),
+            element_index: match m.get("element_index") {
+                None => None,
+                Some(v) => Some(int_ge0(v).ok_or("element_index must be a nonnegative integer")?),
+            },
         },
         "press_key" => Call::PressKey {
             window: parse_window(params)?,
@@ -615,6 +619,20 @@ mod tests {
         let c = parse_call("get_window_state", &json!({"window":{"app":"a","id":1}})).unwrap();
         assert!(matches!(c, Call::GetWindowState { include_screenshot: true, include_text: false, .. }));
         assert!(parse_call("get_window_state", &json!({"window":{"app":"a","id":1},"include_screenshot":false})).is_err());
+    }
+
+    #[test]
+    fn type_text_explicit_target_is_optional_and_validated() {
+        let valid = json!({"window":{"app":"test.exe","id":1},"text":"hello","element_index":3});
+        assert!(matches!(parse_call("type_text", &valid).unwrap(), Call::TypeText { element_index: Some(3), .. }));
+        let legacy = json!({"window":{"app":"test.exe","id":1},"text":"hello"});
+        assert!(matches!(parse_call("type_text", &legacy).unwrap(), Call::TypeText { element_index: None, .. }));
+        let native_string = json!({"window":{"app":"test.exe","id":1},"text":"hello","element_index":"3"});
+        assert!(matches!(parse_call("type_text", &native_string).unwrap(), Call::TypeText { element_index: Some(3), .. }));
+        for invalid in [json!(-1), json!(1.5), json!("invalid"), Value::Null] {
+            let params = json!({"window":{"app":"test.exe","id":1},"text":"hello","element_index":invalid});
+            assert!(parse_call("type_text", &params).is_err());
+        }
     }
 
     #[test]

@@ -15,3 +15,10 @@ test_linux.log
 # Local helper state
 .ocu-replica/
 .codex/
+
+# Supervisor and local acceptance artifacts
+/state/
+__pycache__/
+/tests/*/
+/tests/fixture-*.json
+/tests/fixture-*.tmp

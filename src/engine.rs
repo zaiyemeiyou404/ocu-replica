@@ -307,10 +307,31 @@ impl Engine {
         if self.closed {
             return EngineOutcome::Err("helper is closed".into());
         }
-        self.request_mode = match mode::resolve_mode(params, self.input_mode) {
+        // Keep this check below both stdio frontends: removed tools cannot be
+        // reached by spelling a native-protocol method manually.
+        if !crate::mcp::RETAINED_TOOLS.contains(&method) {
+            return EngineOutcome::Err(format!("method '{method}' is not supported in the retained native build"));
+        }
+        // Cleanup must remain callable after Esc. Durable markers still prevent
+        // resuming the stopped turn; a new turn may run after cleanup.
+        if method == "end_turn" {
+            if let Some(tk) = self.current_turn.take() {
+                self.interrupts.clear_turn(&tk.session, &tk.turn);
+            }
+            self.interrupts.latched = false;
+            self.backend.show_overlay(false);
+            return EngineOutcome::Ok(Value::Null);
+        }
+        self.request_mode = match mode::resolve_mode(params, InputMode::Background) {
             Ok(m) => m,
             Err(e) => return EngineOutcome::Err(e),
         };
+        if self.request_mode != InputMode::Background {
+            return EngineOutcome::Err("this build only supports background input_mode".into());
+        }
+        if method == "type_text" && params.get("element_index").is_none() {
+            return EngineOutcome::Err("type_text requires an explicit element_index".into());
+        }
         self.backend.set_input_mode_label(self.request_mode.as_str());
         // Esc latch / marker.
         if let Some(tk) = protocol::turn_key(meta) {
@@ -538,15 +559,11 @@ impl Engine {
                         self.backend.scroll_element(window.id, element_index, rev, direction, pages).map_err(EngineError::Msg)?;
                         Ok(json!({"backend": "uia"}))
                     }
-                    Call::TypeText { window, text } => {
-                        let focused = self.ax.as_ref().and_then(|ax| {
-                            if ax.window_id == window.id {
-                                // Best-effort: no focused index cached; None → ValuePattern/PostMessage/SendInput.
-                                None
-                            } else {
-                                None
-                            }
-                        });
+                    Call::TypeText { window, text, element_index } => {
+                        let focused = match element_index {
+                            Some(index) => Some((index, self.ax_revision(window.id)?)),
+                            None => None,
+                        };
                         let backend = self
                             .backend
                             .action_type_text(mode, window.id, &text, focused)
@@ -561,7 +578,8 @@ impl Engine {
                     Call::SetValue { window, element_index, value } => {
                         let rev = self.ax_revision(window.id)?;
                         self.backend.set_value(window.id, element_index, rev, &value).map_err(EngineError::Msg)?;
-                        Ok(json!({"backend": "uia"}))
+                        let backend = self.backend.last_action_backend();
+                        Ok(json!({"backend": if backend.is_empty() { "uia" } else { &backend }}))
                     }
                     Call::PerformSecondaryAction { window, element_index, action } => {
                         let rev = self.ax_revision(window.id)?;
@@ -912,6 +930,27 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn cleanup_rejects_removed_methods_and_foreground_overrides() {
+        let mut e = eng();
+        for name in ["browser_list_tabs", "browser_navigate", "start_audio_recording", "activate_window", "press_key", "drag", "scroll", "launch_app", "click", "scope_monitor", "move_window_to_scope"] {
+            match e.handle(name, &json!({}), &Map::new()) {
+                EngineOutcome::Err(message) => assert!(message.contains("not supported"), "{name}: {message}"),
+                other => panic!("removed method {name} returned {other:?}"),
+            }
+        }
+        for mode in ["foreground", "auto"] {
+            match e.handle("list_windows", &json!({"input_mode":mode}), &Map::new()) {
+                EngineOutcome::Err(message) => assert!(message.contains("background")),
+                other => panic!("unsafe mode {mode} returned {other:?}"),
+            }
+        }
+        match e.handle("type_text", &json!({"window":{"app":"stub","id":1},"text":"test"}), &Map::new()) {
+            EngineOutcome::Err(message) => assert!(message.contains("element_index")),
+            other => panic!("implicit input returned {other:?}"),
+        }
+    }
+
     fn eng() -> Engine {
         // Force a temp home so tests don't touch the real one.
         let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -970,9 +1009,23 @@ mod tests {
         if let Some(shot) = e.shots.get_mut(&sid) {
             shot.geometry.window = Rect::new(0, 0, 10, 10);
         }
-        match e.handle("click", &json!({"window":{"app":"stub","id":1},"x":1,"y":1,"screenshotId": sid}), &Map::new()) {
-            EngineOutcome::Err(m) => assert!(m.contains("bounds changed")),
-            other => panic!("{other:?}"),
-        }
+        let window = WindowRef { app: "stub".into(), id: 1, title: None };
+        assert!(matches!(e.resolve_point(&window, 1.0, 1.0, Some(&sid)), Err(EngineError::Msg(m)) if m.contains("bounds changed")));
+    }
+
+    #[test]
+    fn end_turn_after_esc_allows_new_turn_but_not_stopped_turn() {
+        let mut e = eng();
+        let mut old = Map::new();
+        old.insert("x-codex-turn-metadata".into(), json!({"session_id":"cleanup-session","turn_id":"old"}));
+        assert!(matches!(e.handle("list_apps", &json!({}), &old), EngineOutcome::Ok(_)));
+        e.on_physical_esc();
+        assert!(matches!(e.handle("list_apps", &json!({}), &old), EngineOutcome::Err(_)));
+        assert!(matches!(e.handle("end_turn", &json!({}), &old), EngineOutcome::Ok(_)));
+        assert!(!e.interrupts.latched);
+        assert!(matches!(e.handle("list_apps", &json!({}), &old), EngineOutcome::Err(_)));
+        let mut next = Map::new();
+        next.insert("x-codex-turn-metadata".into(), json!({"session_id":"cleanup-session","turn_id":"next"}));
+        assert!(matches!(e.handle("list_apps", &json!({}), &next), EngineOutcome::Ok(_)));
     }
 }

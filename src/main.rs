@@ -32,9 +32,13 @@ use std::time::Duration;
 
 fn print_help() {
     eprintln!(
-        "ocu-replica {} — Windows computer-use helper (clean-room replica)\n\n\
-         USAGE:\n  ocu-replica [--mcp]                MCP stdio server (default)\n  ocu-replica --stdio-native         Native newline-JSON protocol\n  ocu-replica --parent-pid <pid>     Exit when parent process exits\n  ocu-replica --help\n\n\
-         ENV:\n  CODEX_HOME / OCU_REPLICA_HOME      State directory\n  SKY_ENABLE_AUDIO=1                 Enable start/stop_audio_recording\n  OCU_REPLICA_MAX_EDGE               Max screenshot long edge (default 1600)\n         OCU_INPUT_MODE                     foreground|background|auto (default auto)\n         OCU_IDLE_MS / OCU_IDLE_TIMEOUT_MS  Idle gate for auto→SendInput (3000 / 30000)\n         OCU_ALLOW_POSTMESSAGE=1            Optional WM_* PostMessage path\n         OCU_CDP_PORT                       Chromium remote-debugging port\n         OCU_MONITOR                        Single-monitor scope (index|DISPLAY|primary)\n         OCU_PREAPPROVE                     Comma-separated exe names or paths that skip the\n                                            first-use MessageBox (unattended/CI only; default off)\n         OCU_PREAPPROVE_FILE                Text file of the same tokens, one per line\n",
+        "ocu-native {} - retained Windows native controls\n\n\
+         Use runtime/supervisor.py for MCP stdio with timeout and cancellation.\n\
+         Direct helper options: --mcp, --stdio-native, --parent-pid N, --help.\n\
+         Background mode only; explicit element_index required for input.\n\
+         State: OCU_REPLICA_HOME. Image size: OCU_REPLICA_MAX_EDGE.\n\
+         App approvals: normal first-use prompt, or caller-supplied OCU_PREAPPROVE.\n\
+         CDP, audio, global keys, dragging, coordinate clicks and foreground fallback are not exposed.",
         env!("CARGO_PKG_VERSION")
     );
 }

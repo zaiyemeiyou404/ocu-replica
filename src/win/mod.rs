@@ -14,6 +14,7 @@ mod audio;
 mod signature;
 mod approval;
 mod postmessage;
+mod native_controls;
 mod display;
 
 use crate::activity::ActivityTracker;
@@ -244,6 +245,16 @@ impl Backend for WinBackend {
         self.ax.element_bounds(id, element_index, revision)
     }
     fn set_value(&mut self, id: u64, element_index: u64, revision: u64, value: &str) -> Result<(), String> {
+        if self.input_mode_label != "foreground" {
+            if let Some(hwnd) = self.ax.native_control(id, element_index, revision)? {
+                if native_controls::is_edit(hwnd) {
+                    native_controls::set_text(hwnd, value, false)?;
+                    self.note("win32_message");
+                    return Ok(());
+                }
+            }
+            return Err("unsupported native edit control; no generic UIA or foreground fallback in this build".into());
+        }
         self.ax.set_value(id, element_index, revision, value)?;
         self.note("uia");
         Ok(())
@@ -308,7 +319,6 @@ impl Backend for WinBackend {
                 "lastActionBackend": self.last_backend,
                 "lastCaptureBackend": self.last_capture_backend,
                 "postMessageEnabled": postmessage_enabled(),
-                "cdpPorts": cdp::discovery_ports(),
                 "escHookInstalled": true,
             }
         }))
@@ -383,7 +393,17 @@ impl Backend for WinBackend {
         count: u32,
     ) -> Result<String, String> {
         // UIA first (background / auto).
-        if mode != InputMode::Foreground {
+        if mode != InputMode::Foreground && button == MouseButton::Left && count == 1 {
+            if let Some(hwnd) = self.ax.native_control(id, element_index, revision)? {
+                if native_controls::is_button(hwnd) {
+                    native_controls::click(hwnd)?;
+                    self.note("win32_message");
+                    return Ok("win32_message".into());
+                }
+            }
+            if mode == InputMode::Background {
+                return Err("unsupported native button control; no generic UIA fallback in this build".into());
+            }
             match self.click_element_uia(id, element_index, revision) {
                 Ok(()) => return Ok("uia".into()),
                 Err(e) if mode == InputMode::Background => {
@@ -419,7 +439,7 @@ impl Backend for WinBackend {
         button: MouseButton,
         count: u32,
     ) -> Result<String, String> {
-        if mode != InputMode::Foreground {
+        if mode != InputMode::Foreground && button == MouseButton::Left && count == 1 {
             match self.click_point_uia(id, sx, sy) {
                 Ok(()) => return Ok("uia".into()),
                 Err(e) if mode == InputMode::Background => {
@@ -450,11 +470,19 @@ impl Backend for WinBackend {
         focused: Option<(u64, u64)>,
     ) -> Result<String, String> {
         if mode != InputMode::Foreground {
-            // The engine does not yet thread a focused element index through.
-            // Fall back to the first edit/document cached by the last snapshot
-            // so background type_text can use ValuePattern without SendInput.
-            let target = focused.or_else(|| self.ax.first_editable(id));
+            // An explicit target wins. Without one, never guess between fields.
+            let target = focused.or_else(|| self.ax.unique_editable(id));
             if let Some((ei, rev)) = target {
+                if let Some(hwnd) = self.ax.native_control(id, ei, rev)? {
+                    if native_controls::is_edit(hwnd) {
+                        native_controls::set_text(hwnd, text, true)?;
+                        self.note("win32_message");
+                        return Ok("win32_message".into());
+                    }
+                }
+                if mode == InputMode::Background {
+                    return Err("unsupported native edit control; no generic UIA fallback in this build".into());
+                }
                 match self.append_value_uia(id, ei, rev, text) {
                     Ok(()) => return Ok("uia".into()),
                     Err(e) if mode == InputMode::Background => {
@@ -471,7 +499,7 @@ impl Backend for WinBackend {
                     self.postmessage_type(id, text)?;
                     return Ok("postmessage".into());
                 }
-                return Err("background type_text needs a focused ValuePattern element or OCU_ALLOW_POSTMESSAGE=1".into());
+                return Err("background type_text requires element_index when no unique editable control exists".into());
             }
         }
         if mode == InputMode::Background {

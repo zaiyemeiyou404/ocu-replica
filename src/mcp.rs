@@ -1,11 +1,15 @@
 //! MCP stdio front-end (JSON-RPC 2.0, protocol versions 2024-11-05 / 2025-03-26).
 //!
-//! Exposes the same 20 methods as tools. Tool argument schemas mirror the
-//! native params (verified field names). Image results are returned as
-//! `image` content blocks (base64 PNG) alongside any text summary.
+//! Exposes the retained native window and control tools. Unsupported methods
+//! are rejected by the shared dispatcher as well as omitted from discovery.
 
-use crate::protocol::{EXTRA_METHODS, METHODS};
 use serde_json::{json, Map, Value};
+
+pub const RETAINED_TOOLS: &[&str] = &[
+    "list_apps", "list_windows", "get_window", "get_window_state",
+    "click_element", "type_text", "set_value", "diagnostic_state",
+    "end_turn", "close", "list_displays",
+];
 
 pub const PROTOCOL_LATEST: &str = "2025-03-26";
 pub const PROTOCOL_FALLBACK: &str = "2024-11-05";
@@ -45,18 +49,10 @@ fn window_prop() -> Value {
 pub fn tools_list() -> Value {
     let tools = vec![
         tool("list_apps", "List installed apps and their currently open targetable windows.", json!({"type":"object","properties":{}})),
-        tool("launch_app", "Launch an app by id (from list_apps) or by an absolute .exe path.", json!({
-            "type":"object","required":["app"],
-            "properties":{"app":{"type":"string"}}
-        })),
         tool("list_windows", "List open windows that can be targeted.", json!({"type":"object","properties":{}})),
         tool("get_window", "Rehydrate a currently open window by id.", json!({
             "type":"object","required":["id"],
             "properties":{"id":{"type":"integer","minimum":0},"app":{"type":"string"}}
-        })),
-        tool("activate_window", "Bring an open window to the foreground.", json!({
-            "type":"object","required":["window"],
-            "properties":{"window": window_prop()}
         })),
         tool("get_window_state", "Capture a screenshot and/or accessibility tree for a window.", json!({
             "type":"object","required":["window"],
@@ -65,17 +61,6 @@ pub fn tools_list() -> Value {
                 "include_screenshot":{"type":"boolean","default":true},
                 "include_text":{"type":"boolean","default":false},
                 "input_mode":{"type":"string","enum":["foreground","background","auto"]}
-            }
-        })),
-        tool("click", "Click a window-relative coordinate (or an element_index).", json!({
-            "type":"object","required":["window"],
-            "properties":{
-                "window": window_prop(),
-                "x":{"type":"number"},"y":{"type":"number"},
-                "element_index":{"type":"integer","minimum":0},
-                "screenshotId":{"type":"string"},
-                "mouse_button":{"type":"string","enum":["left","right","middle","l","r","m"]},
-                "click_count":{"type":"integer","minimum":1}
             }
         })),
         tool("click_element", "Click an indexed element from the latest get_window_state tree.", json!({
@@ -87,40 +72,9 @@ pub fn tools_list() -> Value {
                 "click_count":{"type":"integer","minimum":1}
             }
         })),
-        tool("drag", "Drag from one window-relative point to another.", json!({
-            "type":"object","required":["window","from_x","from_y","to_x","to_y"],
-            "properties":{
-                "window": window_prop(),
-                "from_x":{"type":"number"},"from_y":{"type":"number"},
-                "to_x":{"type":"number"},"to_y":{"type":"number"},
-                "screenshotId":{"type":"string"}
-            }
-        })),
-        tool("scroll", "Scroll by a delta from a window-relative coordinate.", json!({
-            "type":"object","required":["window","x","y"],
-            "properties":{
-                "window": window_prop(),
-                "x":{"type":"number"},"y":{"type":"number"},
-                "scrollX":{"type":"number"},"scrollY":{"type":"number"},
-                "screenshotId":{"type":"string"}
-            }
-        })),
-        tool("scroll_element", "Scroll an indexed element via its ScrollPattern.", json!({
-            "type":"object","required":["window","element_index","direction"],
-            "properties":{
-                "window": window_prop(),
-                "element_index":{"type":"integer","minimum":0},
-                "direction":{"type":"string","enum":["up","down","left","right","u","d","l","r"]},
-                "pages":{"type":"number","exclusiveMinimum":0}
-            }
-        })),
         tool("type_text", "Type text into the current focus in a window.", json!({
             "type":"object","required":["window","text"],
-            "properties":{"window": window_prop(),"text":{"type":"string"}}
-        })),
-        tool("press_key", "Press a + -separated keyboard chord (X11 keysym-style names).", json!({
-            "type":"object","required":["window","key"],
-            "properties":{"window": window_prop(),"key":{"type":"string"}}
+            "properties":{"window": window_prop(),"text":{"type":"string"},"element_index":{"type":"integer","minimum":0}}
         })),
         tool("set_value", "Replace the value of an indexed editable element.", json!({
             "type":"object","required":["window","element_index","value"],
@@ -130,72 +84,32 @@ pub fn tools_list() -> Value {
                 "value":{"type":"string"}
             }
         })),
-        tool("perform_secondary_action", "Invoke Raise / Scroll Up|Down|Left|Right / Expand / Collapse on an element.", json!({
-            "type":"object","required":["window","element_index","action"],
-            "properties":{
-                "window": window_prop(),
-                "element_index":{"type":"integer","minimum":0},
-                "action":{"type":"string"}
-            }
-        })),
-        tool("start_audio_recording", "Start WASAPI loopback capture (requires SKY_ENABLE_AUDIO=1 and session approval).", json!({
-            "type":"object",
-            "properties":{"max_duration_ms":{"type":"integer","minimum":1,"maximum":300000}}
-        })),
-        tool("stop_audio_recording", "Stop the active recording and return a 24 kHz stereo WAV filepath.", json!({"type":"object","properties":{}})),
         tool("diagnostic_state", "Return internal cache / capture diagnostics.", json!({
             "type":"object",
             "properties":{"window": window_prop()}
         })),
         tool("end_turn", "Mark the current turn finished; clears Esc interruption for this turn.", json!({"type":"object","properties":{}})),
         tool("close", "Shut down the helper.", json!({"type":"object","properties":{}})),
-        // --- extras: CDP browser + single-monitor scope ---
-        tool("browser_list_tabs", "List Chromium/Edge tabs exposed via localhost CDP (--remote-debugging-port).", json!({"type":"object","properties":{}})),
-        tool("browser_screenshot", "Page.captureScreenshot without activating the tab.", json!({
-            "type":"object","required":["tab_id"],
-            "properties":{"tab_id":{"type":"string"}}
-        })),
-        tool("browser_get_state", "Accessibility.getFullAXTree with element_index lines.", json!({
-            "type":"object","required":["tab_id"],
-            "properties":{"tab_id":{"type":"string"}}
-        })),
-        tool("browser_click", "Input.dispatchMouseEvent click (no OS focus).", json!({
-            "type":"object","required":["tab_id","x","y"],
-            "properties":{
-                "tab_id":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},
-                "mouse_button":{"type":"string"},"click_count":{"type":"integer","minimum":1}
-            }
-        })),
-        tool("browser_type", "Input.insertText into the CDP target.", json!({
-            "type":"object","required":["tab_id","text"],
-            "properties":{"tab_id":{"type":"string"},"text":{"type":"string"}}
-        })),
-        tool("browser_press_key", "Input.dispatchKeyEvent keyDown/keyUp.", json!({
-            "type":"object","required":["tab_id","key"],
-            "properties":{"tab_id":{"type":"string"},"key":{"type":"string"}}
-        })),
-        tool("browser_scroll", "Input.dispatchMouseEvent mouseWheel.", json!({
-            "type":"object","required":["tab_id","x","y"],
-            "properties":{
-                "tab_id":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},
-                "scrollX":{"type":"number"},"scrollY":{"type":"number"}
-            }
-        })),
-        tool("browser_navigate", "Page.navigate (approvals/blocklist still apply).", json!({
-            "type":"object","required":["tab_id","url"],
-            "properties":{"tab_id":{"type":"string"},"url":{"type":"string"}}
-        })),
         tool("list_displays", "List monitors (index, device name, rect, work area, DPI, primary).", json!({"type":"object","properties":{}})),
-        tool("scope_monitor", "Set or clear the single-monitor scope for this session (index, \\\\.\\DISPLAYn, or primary).", json!({
-            "type":"object",
-            "properties":{"monitor":{"type":"string"},"selector":{"type":"string"}}
-        })),
-        tool("move_window_to_scope", "Move a window onto the scoped monitor work area (requires approval).", json!({
-            "type":"object","required":["window"],
-            "properties":{"window": window_prop()}
-        })),
     ];
-    debug_assert_eq!(tools.len(), METHODS.len() + EXTRA_METHODS.len());
+    let mut tools = tools;
+    for tool in &mut tools {
+        let schema = &mut tool["inputSchema"];
+        if let Some(props) = schema["properties"].as_object_mut() {
+            if props.contains_key("input_mode") {
+                props.insert("input_mode".into(), json!({"type":"string","enum":["background"],"default":"background"}));
+            }
+        }
+        if tool["name"] == "type_text" {
+            tool["inputSchema"]["required"] = json!(["window", "text", "element_index"]);
+            tool["description"] = json!("Insert text at the selected native edit control's caret. Requires element_index; unsupported control classes fail without a foreground fallback.");
+        }
+        if tool["name"] == "click_element" {
+            tool["description"] = json!("Single left click on a known native Button/CheckBox control. Unsupported controls fail without a UIA or foreground fallback.");
+            tool["inputSchema"]["properties"]["mouse_button"] = json!({"type":"string","enum":["left"]});
+            tool["inputSchema"]["properties"]["click_count"] = json!({"type":"integer","const":1});
+        }
+    }
     json!({"tools": tools})
 }
 
@@ -300,16 +214,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tools_cover_all_methods() {
+    fn cleanup_exposes_only_the_retained_native_tools() {
         let list = tools_list();
         let names: Vec<&str> = list["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        for m in METHODS {
+        let expected = ["list_apps", "list_windows", "get_window", "get_window_state", "click_element", "type_text", "set_value", "diagnostic_state", "end_turn", "close", "list_displays"];
+        assert_eq!(names.len(), expected.len());
+        for name in expected { assert!(names.contains(&name), "missing retained tool {name}"); }
+    }
+
+    #[test]
+    fn tools_cover_retained_methods() {
+        let list = tools_list();
+        let names: Vec<&str> = list["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for m in RETAINED_TOOLS {
             assert!(names.contains(&m), "missing tool {m}");
         }
-        for m in EXTRA_METHODS {
-            assert!(names.contains(&m), "missing extra tool {m}");
-        }
-        assert_eq!(names.len(), METHODS.len() + EXTRA_METHODS.len());
+        assert_eq!(names.len(), RETAINED_TOOLS.len());
     }
 
     #[test]
