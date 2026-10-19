@@ -140,7 +140,9 @@ function Save-Images($Resp, [string]$Prefix) {
             $i++
         }
     }
-    return $saved
+    # A one-element array is unrolled into a bare string on return. Indexing that
+    # string yields the first character, so Test-Png then rejects a real PNG.
+    return ,$saved
 }
 
 function Test-Png([string]$Path) {
@@ -332,7 +334,7 @@ try {
                     input_mode         = "foreground"
                 }
             } 60000
-            $shots = Save-Images $resp "fg-state"
+            $shots = @(Save-Images $resp "fg-state")
             $fgState = Get-ToolPayload $resp
             Save-Json "get_window_state_fg" $fgState
             $tree = [string]$fgState.accessibility.tree
@@ -556,7 +558,7 @@ try {
                     input_mode         = "background"
                 }
             } 60000
-            $shots = Save-Images $resp "bg-state"
+            $shots = @(Save-Images $resp "bg-state")
             $bg = Get-ToolPayload $resp
             Save-Json "get_window_state_bg" $bg
             $respD = Send-Rpc $client "tools/call" @{ name = "diagnostic_state"; arguments = @{} } 20000
