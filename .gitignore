@@ -1,0 +1,17 @@
+# Build outputs
+/target/
+**/*.exe
+**/*.pdb
+**/*.dll
+**/*.exp
+**/*.lib
+
+# Stray logs and local evidence (CI uploads these as artifacts, not commits)
+*.log
+build_win.log
+test_linux.log
+/gui-artifacts/
+
+# Local helper state
+.ocu-replica/
+.codex/
